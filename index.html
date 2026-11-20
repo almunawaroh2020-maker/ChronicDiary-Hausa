@@ -1934,247 +1934,939 @@ window.addEventListener('pageshow',event=>{if(event.persisted && db.pin?.hash)sh
 
 /* ================= ChronicDiary Hausa / Naija Speech integration =================
    API credentials are read only by the Vercel serverless function. */
-let chronicLanguage='en';
-let recorderStream=null,mediaRecorder=null,recordingChunks=[],recordingField=null,recordingStartedAt=0;
-let activeHausaAudio=null,hausaGuideOriginal=null,guidelineOriginal=null,hausaSpeechToken=0,recordingLanguage='en';
-const NAIJA_PROXY='/api/naija';
-function selectedLanguage(){return chronicLanguage==='ha'?'ha':'en'}
-function setLanguageStatus(message){let n=document.getElementById('languageStatus');if(!n){n=document.createElement('span');n.id='languageStatus';n.className='language-status';document.querySelector('.language-control')?.appendChild(n)}n.textContent=message||''}
-async function naijaRequest(payload){
- const response=await fetch(NAIJA_PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
- let data;try{data=await response.json()}catch(_){throw new Error('The speech service returned an unreadable response.')}
- if(!response.ok||data.error)throw new Error(data.error?.message||data.message||('Speech service error ('+response.status+').'));
- return data;
+
+/* ============ ChronicDiary Hausa / English Speech Integration ============ */
+
+let chronicLanguage = 'en';
+let recorderStream = null;
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingField = null;
+let recordingLanguage = 'en';
+let englishRecognition = null;
+let activeHausaAudio = null;
+let activeSpeechButton = null;
+let hausaGuideOriginal = null;
+let guidelineOriginal = null;
+let hausaSpeechToken = 0;
+
+const NAIJA_PROXY = '/api/naija';
+
+function selectedLanguage() {
+  return chronicLanguage === 'ha' ? 'ha' : 'en';
 }
-async function translateText(text,source,target){
- text=String(text||'').trim();if(!text)throw new Error('There is no text to translate.');
- if(text.length>2000)throw new Error('This translation is too long. Please translate a shorter section (maximum 2,000 characters).');
- const data=await naijaRequest({action:'translate',text,source:source||'en',target:target||'ha'});
- if(!data.text)throw new Error('No translated text was returned.');return data.text;
+
+function setLanguageStatus(message) {
+  let n = document.getElementById('languageStatus');
+  if (!n) {
+    n = document.createElement('span');
+    n.id = 'languageStatus';
+    n.className = 'language-status';
+    document.querySelector('.language-control')?.appendChild(n);
+  }
+  n.textContent = message || '';
 }
-function bytesToBase64(buffer){let binary='';const bytes=new Uint8Array(buffer);const step=0x8000;for(let i=0;i<bytes.length;i+=step)binary+=String.fromCharCode(...bytes.subarray(i,i+step));return btoa(binary)}
-async function transcribeBlob(blob,language){
- if(!blob||!blob.size)throw new Error('No audio was recorded. Please try again.');
- if(blob.size>2.8*1024*1024)throw new Error('This recording is too large for the demo upload. Please record a shorter voice note.');
- const base64=bytesToBase64(await blob.arrayBuffer());
- const data=await naijaRequest({action:'transcribe',audioBase64:base64,mimeType:blob.type||'audio/webm',filename:'chronicdiary-voice.webm',language:language||'ha'});
- if(!data.text)throw new Error('No speech was detected. Please speak clearly and try again.');
- return data;
+
+function setSpeechStatus(id, message) {
+  const target = document.querySelector(`[data-speech-status="${id}"]`);
+  if (target) target.textContent = message;
+  else {
+    const prefix = String(id).startsWith('reg') ? 'reg' : 'profile';
+    const group = document.getElementById(prefix + 'ConditionSpeechStatus');
+    if (group) group.textContent = message;
+  }
 }
-async function ensureMicPermission(){
- try{if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)throw new Error('Audio recording is not supported in this browser. Use an updated Chrome browser over HTTPS.');
-  if(recorderStream&&recorderStream.active)return true;
-  recorderStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});return true;
- }catch(e){setLanguageStatus('Microphone permission needed');alert(e.message||'Allow microphone access in your browser settings.');return false}
-}
-async function requestMicPermission(){
- if(micEnabled){disableMicrophone();return}
- updateMicPermissionUI('Requesting microphone permission…');const ok=await ensureMicPermission();
- if(ok){micEnabled=true;updateMicPermissionUI('Microphone enabled. Choose Dictate to record Hausa or English speech.');setLanguageStatus('Microphone ready')}
- else{micEnabled=false;updateMicPermissionUI('Microphone off. Allow microphone access to dictate.')}
-}
-function disableMicrophone(){
- micEnabled=false;stopAudioRecording(true);if(recorderStream){recorderStream.getTracks().forEach(t=>t.stop());recorderStream=null}
- updateMicPermissionUI('Microphone disabled. You can still type.');setLanguageStatus('')
-}
-function updateMicButton(id,recording){const b=document.querySelector(`[data-speech-action="dictate"][data-target="${id}"]`);if(b){b.textContent=recording?'■ Stop':'🎙 Dictate';b.classList.toggle('recording',recording);b.setAttribute('aria-pressed',String(recording))}}
-function setSpeechStatus(id,message){const target=document.querySelector(`[data-speech-status="${id}"]`);if(target)target.textContent=message;else if(String(id).endsWith('ConditionVoiceTemp')){const prefix=String(id).startsWith('reg')?'reg':'profile';const groupStatus=document.getElementById(prefix+'ConditionSpeechStatus');if(groupStatus)groupStatus.textContent=message}}
-function stopAudioRecording(cancel=false){
- if(mediaRecorder&&mediaRecorder.state!=='inactive'){mediaRecorder._cancelRecording=cancel;try{mediaRecorder.stop()}catch(_){}}
- else if(cancel){recordingField=null;recordingChunks=[]}
-}
-async function toggleDictation(id){
- if(!micEnabled){setSpeechStatus(id,'Enable the microphone first.');return}
- if(mediaRecorder&&mediaRecorder.state==='recording'){
-  if(recordingField===id){setSpeechStatus(id,'Finishing recording…');mediaRecorder.stop();return}
-  setSpeechStatus(id,'Stop the current recording before starting another field.');return;
- }
- if(mediaRecorder&&mediaRecorder.state!=='inactive'){setSpeechStatus(id,'Please wait for the previous recording to finish.');return}
- const ok=await ensureMicPermission();if(!ok)return;
- const field=document.getElementById(id);if(!field)return;
- try{
-  recordingField=id;recordingLanguage=selectedLanguage();recordingChunks=[];
-  const options=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?{mimeType:'audio/webm;codecs=opus'}:undefined;
-  mediaRecorder=new MediaRecorder(recorderStream,options);
-  mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)recordingChunks.push(e.data)};
-  mediaRecorder.onerror=e=>{setSpeechStatus(id,'Recording error: '+(e.error?.message||'please try again'));updateMicButton(id,false);recordingField=null};
-  mediaRecorder.onstop=async()=>{
-   const targetId=recordingField;const chunks=recordingChunks.slice();const cancelled=mediaRecorder?mediaRecorder._cancelRecording:false;
-   recordingChunks=[];recordingField=null;updateMicButton(id,false);
-   if(cancelled){setSpeechStatus(id,'Recording cancelled.');return}
-   const blob=new Blob(chunks,{type:chunks[0]?.type||'audio/webm'});
-   try{
-    setSpeechStatus(id,'Transcribing '+(recordingLanguage==='ha'?'Hausa':'English')+' speech…');
-    const result=await transcribeBlob(blob,recordingLanguage);
-    let transcript=result.text;
-    if(field.tagName==='SELECT'&&selectedLanguage()==='ha'){
-      setSpeechStatus(id,'Converting the Hausa option name…');
-      try{transcript=await translateText(transcript,'ha','en')}catch(_){/* show the original transcript below */}
-      chooseSelectOption(field,transcript);
-    }else{
-      field.value=(field.value.trim()?field.value.trim()+' ':'')+transcript;
-      field.dataset.contentLanguage=selectedLanguage();field.dispatchEvent(new Event('input',{bubbles:true}));
-      setSpeechStatus(id,'Transcribed '+(selectedLanguage()==='ha'?'Hausa':'English')+'. Review before saving.');
-    }
-   }catch(e){setSpeechStatus(id,'Transcription failed: '+e.message)}
-  };
-  mediaRecorder.start();recordingStartedAt=Date.now();updateMicButton(id,true);setSpeechStatus(id,'Recording '+(selectedLanguage()==='ha'?'Hausa':'English')+'… tap Stop when finished.');
-  const thisRecorder=mediaRecorder;setTimeout(()=>{if(mediaRecorder===thisRecorder&&mediaRecorder.state==='recording'&&recordingField===id){setSpeechStatus(id,'Maximum demo recording time reached. Processing…');mediaRecorder.stop()}},45000);
- }catch(e){recordingField=null;updateMicButton(id,false);setSpeechStatus(id,'Could not start recording: '+e.message)}
-}
-function showTranslationResult(fieldId,text,translated,source,target){
- const field=document.getElementById(fieldId);if(!field)return;
- let panel=field.parentElement.querySelector(`.translation-result[data-for="${fieldId}"]`);
- if(!panel){panel=document.createElement('div');panel.className='translation-result';panel.dataset.for=fieldId;field.parentElement.appendChild(panel)}
- panel.replaceChildren();const label=document.createElement('strong');label.textContent=(source==='ha'?'Hausa → English':'English → Hausa')+': ';panel.appendChild(label);
- const output=document.createElement('div');output.textContent=translated;panel.appendChild(output);
- const actions=document.createElement('div');actions.className='translation-actions';if(field.tagName!=='SELECT'){const use=document.createElement('button');use.type='button';use.className='btn small soft';use.textContent='Use translation';use.addEventListener('click',()=>{field.value=translated;field.dataset.contentLanguage=target;field.dispatchEvent(new Event('input',{bubbles:true}));setSpeechStatus(fieldId,'Translation inserted. Review before saving.');panel.remove()});actions.append(use)}const keep=document.createElement('button');keep.type='button';keep.className='btn small';keep.textContent=field.tagName==='SELECT'?'Close':'Keep original';keep.addEventListener('click',()=>panel.remove());actions.append(keep);panel.appendChild(actions);
-}
-async function translateField(id){
- const field=document.getElementById(id);if(!field)return;
- const original=field.tagName==='SELECT'?field.selectedOptions?.[0]?.textContent:field.value;
- if(!String(original||'').trim()){setSpeechStatus(id,'Enter or dictate text before translating.');return}
- const source=field.tagName==='SELECT'?'en':(field.dataset.contentLanguage||selectedLanguage()),target=source==='ha'?'en':'ha';
- setSpeechStatus(id,'Translating…');
- try{const translated=await translateText(original,source,target);showTranslationResult(id,original,translated,source,target);setSpeechStatus(id,'Translation ready. Choose whether to insert it.');}
- catch(e){setSpeechStatus(id,'Translation failed: '+e.message)}
-}
-function enhanceTextFields(){
- document.querySelectorAll('.field input,.field select,.field textarea').forEach(field=>{
-  if(!field.id||field.dataset.speechEnhanced||['date','datetime-local','time','hidden','checkbox','radio','file','submit','password'].includes(field.type))return;
-  field.dataset.speechEnhanced='1';let controls=field.parentElement.querySelector(':scope > .inputtools, :scope > .speech-controls');
-  if(!controls){controls=document.createElement('div');field.insertAdjacentElement('afterend',controls)}
-  controls.className='speech-controls';controls.replaceChildren();
-  const buttons=[['dictate','🎙 Dictate'],['translate','⇄ Translate'],['read','🔊 Listen'],['clear','✕ Clear']];
-  buttons.forEach(([action,label])=>{const b=document.createElement('button');b.type='button';b.className='btn small'+(action==='clear'?' danger':action==='translate'?' translate-action':'');b.textContent=label;b.dataset.speechAction=action;b.dataset.target=field.id;b.setAttribute('aria-label',label+' '+(field.labels?.[0]?.textContent||field.id));
-   b.addEventListener('click',()=>{if(action==='dictate')toggleDictation(field.id);if(action==='translate')translateField(field.id);if(action==='read')readBack(field.id,b);if(action==='clear')clearField(field.id)});controls.appendChild(b)});
-  const status=document.createElement('span');status.className='speech-status';status.dataset.speechStatus=field.id;status.setAttribute('role','status');controls.appendChild(status);
- });
- for(const prefix of ['reg','profile']){
-  const group=document.getElementById(prefix+'Conditions');if(!group||group.dataset.speechEnhanced)continue;group.dataset.speechEnhanced='1';
-  const bar=document.createElement('div');bar.className='speech-controls';
-  for(const [label,fn,cls] of [['🎙 Dictate condition(s)',()=>toggleConditionDictation(prefix), ''],['⇄ Translate selection',()=>translateConditionSelection(prefix),' translate-action'],['🔊 Listen',()=>speakText([...group.querySelectorAll('input:checked')].map(x=>x.value).join(', ')||'No conditions selected',null),''],['✕ Clear selection',()=>{group.querySelectorAll('input').forEach(x=>x.checked=false)},' danger']]){const b=document.createElement('button');b.type='button';b.className='btn small'+cls;b.textContent=label;b.addEventListener('click',fn);bar.appendChild(b)}
-  const status=document.createElement('span');status.className='speech-status';status.id=prefix+'ConditionSpeechStatus';bar.appendChild(status);group.insertAdjacentElement('afterend',bar);
- }
-}
-async function toggleConditionDictation(prefix){
- const group=document.getElementById(prefix+'Conditions');if(!group)return;
- const id=prefix+'ConditionVoiceTemp';let temporary=document.getElementById(id);
- if(!temporary){
-  temporary=document.createElement('textarea');temporary.id=id;temporary.style.position='absolute';temporary.style.left='-9999px';document.body.appendChild(temporary);
-  temporary.addEventListener('input',async()=>{let phrase=temporary.value.toLowerCase();if(selectedLanguage()==='ha'){try{phrase=(await translateText(phrase,'ha','en')).toLowerCase()}catch(_){}}
-   const checks=[...group.querySelectorAll('input')];const matched=checks.filter(c=>phrase.includes(c.value.toLowerCase()));matched.forEach(c=>c.checked=true);
-   const status=document.getElementById(prefix+'ConditionSpeechStatus');if(status)status.textContent=matched.length?'Selected: '+matched.map(c=>c.value).join(', '):'Review the transcript and select the matching condition manually.';
+
+async function naijaRequest(payload) {
+  const response = await fetch(NAIJA_PROXY, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   });
- }
- if(mediaRecorder&&mediaRecorder.state==='recording'&&recordingField===id){setSpeechStatus(id,'Finishing condition dictation…');mediaRecorder.stop();return}
- temporary.value='';await toggleDictation(id);
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (_) {
+    throw new Error('Speech service returned an unreadable response.');
+  }
+
+  if (!response.ok || data.error) {
+    throw new Error(data.error?.message || data.message || 'Hausa service error.');
+  }
+
+  return data;
 }
-async function translateConditionSelection(prefix){
- const group=document.getElementById(prefix+'Conditions');const values=[...group.querySelectorAll('input:checked')].map(x=>x.value).join(', ');const status=document.getElementById(prefix+'ConditionSpeechStatus');
- if(!values){if(status)status.textContent='Select or dictate a condition first.';return}
- try{const target='ha';const translated=await translateText(values,'en',target);if(status)status.textContent=(target==='ha'?'Hausa':'English')+': '+translated}catch(e){if(status)status.textContent='Translation failed: '+e.message}
+
+/* Translation: N-ATLaS is used only when Hausa is involved. */
+async function translateText(text, source, target) {
+  text = String(text || '').trim();
+  if (!text) throw new Error('There is no text to translate.');
+
+  if (source === target) return text;
+
+  if (source !== 'ha' && target !== 'ha') return text;
+
+  if (text.length > 2000) {
+    throw new Error('Text must not exceed 2,000 characters.');
+  }
+
+  const data = await naijaRequest({
+    action: 'translate',
+    text,
+    source,
+    target
+  });
+
+  if (!data.text) throw new Error('No translation was returned.');
+  return data.text;
 }
-function splitHausaSpeech(text,limit=950){
- const parts=[];let current='';const units=String(text||'').split(/(?<=[.!?؟])\s+|\n+/).filter(Boolean);
- for(let unit of units){unit=unit.trim();if(!unit)continue;while(unit.length>limit){if(current){parts.push(current);current=''}let cut=unit.lastIndexOf(' ',limit);if(cut<Math.floor(limit*.55))cut=limit;parts.push(unit.slice(0,cut).trim());unit=unit.slice(cut).trim()}if((current+' '+unit).trim().length>limit){if(current)parts.push(current);current=unit}else current=(current+' '+unit).trim()}
- if(current)parts.push(current);return parts;
+
+/* Microphone permission */
+async function ensureMicPermission() {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microphone recording is not supported.');
+    }
+
+    if (recorderStream?.active) return true;
+
+    recorderStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+    return true;
+  } catch (e) {
+    alert(e.message || 'Allow microphone access in your browser.');
+    return false;
+  }
 }
-async function speakText(text,button,options={}){
- text=String(text||'').trim();if(!text){alert('There is no text to read aloud.');return}
- if(chronicLanguage==='ha'){
-  if(activeHausaAudio){hausaSpeechToken++;activeHausaAudio.pause();activeHausaAudio=null;if(button)button.textContent=button.dataset.originalLabel||'🔊 Listen';return}
-  const token=++hausaSpeechToken;
-  try{
-   let spoken=text;if(!options.alreadyHausa&&options.sourceLanguage!=='ha')spoken=await translateText(text,'en','ha');
-   const chunks=splitHausaSpeech(spoken,950);if(!chunks.length)throw new Error('There is no text to speak.');
-   if(button){button.dataset.originalLabel=button.dataset.originalLabel||button.textContent;button.textContent='… Preparing Hausa audio'}
-   for(let i=0;i<chunks.length;i++){
-    if(token!==hausaSpeechToken)return;
-    if(button)button.textContent=chunks.length>1?`▶ Hausa audio ${i+1}/${chunks.length}`:'▶ Hausa audio';
-    const result=await naijaRequest({action:'speech',text:chunks[i],language:'ha',voice:'hausa_male2'});
-    if(token!==hausaSpeechToken)return;
-    const audio=new Audio('data:audio/mpeg;base64,'+result.audioBase64);activeHausaAudio=audio;
-    await new Promise((resolve,reject)=>{audio.onended=resolve;audio.onpause=resolve;audio.onerror=()=>reject(new Error('The audio could not be played by this browser.'));audio.play().catch(reject)});
-    if(activeHausaAudio===audio)activeHausaAudio=null;
-   }
-   if(button)button.textContent=button.dataset.originalLabel||'🔊 Listen';
-  }catch(e){if(button)button.textContent=button.dataset.originalLabel||'🔊 Listen';activeHausaAudio=null;if(token===hausaSpeechToken){setLanguageStatus('Hausa audio error');alert('Hausa speech could not be played: '+e.message)}}
-  return;
- }
- if(!('speechSynthesis'in window)){alert('Text-to-speech is not supported by this browser.');return}
- const synth=window.speechSynthesis;if(synth.speaking&&button&&activeSpeechButton===button){synth.cancel();button.textContent=button.dataset.originalLabel||'🔊 Listen';activeSpeechButton=null;return}
- synth.cancel();if(activeSpeechButton){activeSpeechButton.textContent=activeSpeechButton.dataset.originalLabel||'🔊 Listen';activeSpeechButton=null}
- const utterance=new SpeechSynthesisUtterance(text);utterance.lang='en-NG';utterance.rate=.95;
- if(button){button.dataset.originalLabel=button.dataset.originalLabel||button.textContent;button.textContent='■ Stop audio';activeSpeechButton=button}
- const finish=()=>{if(button&&activeSpeechButton===button){button.textContent=button.dataset.originalLabel;activeSpeechButton=null}};utterance.onend=finish;utterance.onerror=finish;synth.speak(utterance);
+
+async function requestMicPermission() {
+  if (micEnabled) {
+    disableMicrophone();
+    return;
+  }
+
+  updateMicPermissionUI('Requesting microphone permission…');
+
+  const ok = await ensureMicPermission();
+
+  if (ok) {
+    micEnabled = true;
+    updateMicPermissionUI('Microphone enabled. Choose Dictate to speak.');
+    setLanguageStatus('Microphone ready');
+  } else {
+    micEnabled = false;
+    updateMicPermissionUI('Microphone off.');
+  }
 }
-function readBack(id,button){const field=document.getElementById(id);const text=field?.tagName==='SELECT'?field.selectedOptions?.[0]?.textContent:field?.value;speakText(text,button,{sourceLanguage:field?.dataset.contentLanguage||'en',alreadyHausa:field?.dataset.contentLanguage==='ha'})}
-function abortDictation(){if(mediaRecorder&&mediaRecorder.state==='recording')stopAudioRecording(true);recordingField=null}
-function clearField(id){const field=document.getElementById(id);if(!field)return;if(recordingField===id)stopAudioRecording(true);if('speechSynthesis'in window)window.speechSynthesis.cancel();if(activeHausaAudio){activeHausaAudio.pause();activeHausaAudio=null}if(field.tagName==='SELECT'){field.selectedIndex=0;field.dispatchEvent(new Event('change',{bubbles:true}))}else{field.value='';field.dataset.contentLanguage='';field.dispatchEvent(new Event('input',{bubbles:true}))}field.focus();setSpeechStatus(id,'');field.parentElement.querySelector(`.translation-result[data-for="${id}"]`)?.remove()}
-function addGuideSpeechControls(){
- for(const c of document.querySelectorAll('#userGuidelines .guide-item,#measurementGuide .measurement-guide-card,.hausa-guide-panel')){
-  if(c.querySelector('[data-guide-speak]'))continue;const b=document.createElement('button');b.type='button';b.className='btn soft small guide-audio';b.dataset.guideSpeak='yes';b.textContent='🔊 Listen to instructions';b.addEventListener('click',()=>speakText(c.innerText.replace('🔊 Listen to instructions','').trim(),b,{alreadyHausa:chronicLanguage==='ha'}));c.appendChild(b)
- }
+
+function disableMicrophone() {
+  micEnabled = false;
+  stopAudioRecording(true);
+
+  if (englishRecognition) {
+    try { englishRecognition.abort(); } catch (_) {}
+    englishRecognition = null;
+  }
+
+  if (recorderStream) {
+    recorderStream.getTracks().forEach(track => track.stop());
+    recorderStream = null;
+  }
+
+  updateMicPermissionUI('Microphone disabled. You can still type.');
+  setLanguageStatus('');
 }
-function extractGuideSections(){
- const root=document.getElementById('profileMeasurementGuides');if(!root)return [];
- return [...root.querySelectorAll('details.measurement-guide-card')].map((card,i)=>({title:card.querySelector('summary')?.innerText||('Reading guide '+(i+1)),text:[...card.querySelectorAll('li')].map((li,n)=>(n+1)+'. '+li.innerText.trim()).join('\n')}));
+
+/* Dictation button */
+function updateMicButton(id, recording) {
+  const b = document.querySelector(
+    `[data-speech-action="dictate"][data-target="${id}"]`
+  );
+
+  if (b) {
+    b.textContent = recording ? '■ Stop' : '🎙 Dictate';
+    b.classList.toggle('recording', recording);
+    b.setAttribute('aria-pressed', String(recording));
+  }
 }
-async function renderHausaMeasurementGuides(){
- const root=document.getElementById('profileMeasurementGuides');if(!root)return;
- if(!hausaGuideOriginal)hausaGuideOriginal=root.innerHTML;
- root.innerHTML='<div class="notice">Ana fassara dukkan umarnin auna lafiya zuwa Hausa…</div>';
- try{
-  const sections=extractGuideSectionsFromHTML(hausaGuideOriginal);
-  const source=['YADDA AKE AUNA LAFIYA DAIDAI','Umarnin nan na taimakawa wajen yin rikodi daidai. Ka nemi likita ko mai harhada magunguna ya nuna maka yadda ake amfani da na’urarka.'];
-  sections.forEach(section=>{source.push('');source.push(section.title);source.push(section.text)});
-  source.push('');source.push('MUHIMMIN BAYANI');source.push('Ka rubuta sakamakon daidai da na’ura da lokacin aunawa. Kada ka canza magani bisa sakamako guda daya. Idan kana jin rashin lafiya sosai, nemi taimakon gaggawa.');
-  const sourceText=source.join('\n');
-  if(sourceText.length>2000)throw new Error('The complete guide exceeds the translation service limit.');
-  const translated=await translateText(sourceText,'en','ha');
-  const panel=document.createElement('div');panel.className='hausa-guide-panel';
-  const h=document.createElement('h3');h.textContent='Umarnin auna lafiya (Hausa)';panel.append(h);
-  const content=document.createElement('div');content.textContent=translated;panel.append(content);
-  const listen=document.createElement('button');listen.type='button';listen.className='btn soft small guide-audio';listen.textContent='🔊 Saurari dukkan umarnin';listen.addEventListener('click',()=>speakText(translated,listen,{alreadyHausa:true}));panel.append(listen);
-  root.replaceChildren(panel);setLanguageStatus('Umarnin Hausa sun shirya');
- }catch(e){root.innerHTML='';const err=document.createElement('div');err.className='notice';err.textContent='Ba a iya fassara umarnin yanzu ba: '+e.message+' — za ka iya komawa Turanci ka sake gwadawa.';root.append(err);const restore=document.createElement('button');restore.className='btn small';restore.textContent='Show English instructions';restore.onclick=()=>{root.innerHTML=hausaGuideOriginal;root.querySelectorAll('[data-guide-speak]').forEach(b=>b.remove());addGuideSpeechControls()};root.append(restore)}
+
+/* ENGLISH: Browser speech recognition only */
+function startEnglishDictation(id) {
+  const Recognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!Recognition) {
+    setSpeechStatus(id, 'English speech recognition is unavailable in this browser.');
+    return;
+  }
+
+  const field = document.getElementById(id);
+  if (!field) return;
+
+  const recognition = new Recognition();
+  englishRecognition = recognition;
+
+  recognition.lang = 'en-NG';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  let finalTranscript = '';
+  let stopped = false;
+
+  recognition.onstart = () => {
+    updateMicButton(id, true);
+    setSpeechStatus(id, 'Listening in English…');
+  };
+
+  recognition.onresult = event => {
+    let interim = '';
+
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+
+      if (result.isFinal) {
+        finalTranscript += result[0].transcript + ' ';
+      } else {
+        interim += result[0].transcript;
+      }
+    }
+
+    const preview = (finalTranscript + interim).trim();
+
+    if (preview) {
+      setSpeechStatus(id, 'Recognised: ' + preview);
+    }
+  };
+
+  recognition.onerror = event => {
+    setSpeechStatus(id, 'Recognition error: ' + event.error);
+  };
+
+  recognition.onend = () => {
+    if (englishRecognition === recognition) englishRecognition = null;
+
+    updateMicButton(id, false);
+
+    if (finalTranscript.trim()) {
+      field.value = (field.value.trim() ? field.value.trim() + ' ' : '') +
+        finalTranscript.trim();
+
+      field.dataset.contentLanguage = 'en';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+
+      setSpeechStatus(id, 'English transcription complete. Review before saving.');
+    } else if (!stopped) {
+      setSpeechStatus(id, 'No speech detected. Please try again.');
+    }
+  };
+
+  try {
+    recognition.start();
+
+    setTimeout(() => {
+      if (englishRecognition === recognition) {
+        stopped = true;
+        try { recognition.stop(); } catch (_) {}
+      }
+    }, 45000);
+
+  } catch (e) {
+    englishRecognition = null;
+    updateMicButton(id, false);
+    setSpeechStatus(id, 'Could not start recognition: ' + e.message);
+  }
 }
-function extractGuideSectionsFromHTML(markup){const doc=new DOMParser().parseFromString(markup,'text/html');return [...doc.querySelectorAll('details.measurement-guide-card')].map((card,i)=>({title:card.querySelector('summary')?.textContent.trim()||('Reading guide '+(i+1)),text:[...card.querySelectorAll('li')].map((li,n)=>(n+1)+'. '+li.textContent.trim()).join('\n')}))}
-async function renderHausaUserGuidelines(){
- const root=document.getElementById('profileGuidelines');if(!root)return;if(!guidelineOriginal)guidelineOriginal=root.innerHTML;
- const doc=new DOMParser().parseFromString(guidelineOriginal,'text/html');const items=[...doc.querySelectorAll('.guide-item')];
- const source=items.map((item,i)=>{const title=item.querySelector('b')?.textContent||'';const body=item.querySelector('p')?.textContent||'';return (i+1)+'. '+title+'\n'+body}).join('\n\n');
- try{const translated=await translateText(source,'en','ha');const panel=document.createElement('div');panel.className='hausa-guide-panel';const h=document.createElement('h3');h.textContent='Jagorar mai amfani (Hausa)';const content=document.createElement('div');content.textContent=translated;const b=document.createElement('button');b.type='button';b.className='btn soft small guide-audio';b.textContent='🔊 Saurari jagorar';b.onclick=()=>speakText(translated,b,{alreadyHausa:true});panel.append(h,content,b);root.replaceChildren(panel)}catch(e){root.textContent='Ba a iya fassara jagorar yanzu ba: '+e.message;}
+
+/* HAUSA: MediaRecorder + N-ATLaS */
+async function startHausaDictation(id) {
+  const field = document.getElementById(id);
+  if (!field) return;
+
+  const ok = await ensureMicPermission();
+  if (!ok) return;
+
+  try {
+    recordingField = id;
+    recordingLanguage = 'ha';
+    recordingChunks = [];
+
+    const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? { mimeType: 'audio/webm;codecs=opus' }
+      : undefined;
+
+    mediaRecorder = new MediaRecorder(recorderStream, options);
+
+    mediaRecorder.ondataavailable = event => {
+      if (event.data?.size) recordingChunks.push(event.data);
+    };
+
+    mediaRecorder.onerror = () => {
+      updateMicButton(id, false);
+      setSpeechStatus(id, 'Recording failed. Please try again.');
+      recordingField = null;
+    };
+
+    mediaRecorder.onstop = async () => {
+      const chunks = recordingChunks.slice();
+      recordingChunks = [];
+      recordingField = null;
+      updateMicButton(id, false);
+
+      const blob = new Blob(chunks, {
+        type: chunks[0]?.type || 'audio/webm'
+      });
+
+      if (!blob.size) {
+        setSpeechStatus(id, 'No audio recorded.');
+        return;
+      }
+
+      if (blob.size > 2.8 * 1024 * 1024) {
+        setSpeechStatus(id, 'Recording too large. Please record a shorter clip.');
+        return;
+      }
+
+      try {
+        setSpeechStatus(id, 'Sending Hausa recording for transcription…');
+
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let binary = '';
+
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        }
+
+        const audioBase64 = btoa(binary);
+
+        const data = await naijaRequest({
+          action: 'transcribe',
+          audioBase64,
+          mimeType: blob.type || 'audio/webm',
+          filename: 'chronicdiary-hausa.webm',
+          language: 'ha'
+        });
+
+        if (!data.text) throw new Error('No Hausa speech was detected.');
+
+        field.value = (field.value.trim() ? field.value.trim() + ' ' : '') +
+          data.text.trim();
+
+        field.dataset.contentLanguage = 'ha';
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+
+        setSpeechStatus(id, 'Hausa transcription complete. Review before saving.');
+
+      } catch (e) {
+        setSpeechStatus(id, 'Hausa transcription failed: ' + e.message);
+      }
+    };
+
+    mediaRecorder.start();
+    updateMicButton(id, true);
+    setSpeechStatus(id, 'Recording Hausa… tap Stop when finished.');
+
+    const currentRecorder = mediaRecorder;
+
+    setTimeout(() => {
+      if (
+        mediaRecorder === currentRecorder &&
+        currentRecorder.state === 'recording' &&
+        recordingField === id
+      ) {
+        currentRecorder.stop();
+      }
+    }, 45000);
+
+  } catch (e) {
+    recordingField = null;
+    updateMicButton(id, false);
+    setSpeechStatus(id, 'Could not start recording: ' + e.message);
+  }
 }
-async function changeChronicLanguage(language){
- if(activeHausaAudio){hausaSpeechToken++;activeHausaAudio.pause();activeHausaAudio=null}
- chronicLanguage=language==='ha'?'ha':'en';const selector=document.getElementById('chronicLanguage');if(selector)selector.value=chronicLanguage;
- try{localStorage.setItem('chronicdiary_language',chronicLanguage)}catch(_){}
- if(chronicLanguage==='ha'){
-  setLanguageStatus('Ana shirya Hausa…');
-  const active=document.querySelector('.page.active')?.id;
-  if(active==='measurementGuide')await renderHausaMeasurementGuides();
-  else if(active==='userGuidelines')await renderHausaUserGuidelines();
-  else setLanguageStatus('Hausa voice input, translation and read-aloud are ready. Guidance pages are translated when opened.');
- }else{
-  const root=document.getElementById('profileMeasurementGuides');if(root&&hausaGuideOriginal){root.innerHTML=hausaGuideOriginal;root.querySelectorAll('[data-guide-speak]').forEach(b=>b.remove());}
-  const g=document.getElementById('profileGuidelines');if(g&&guidelineOriginal){g.innerHTML=guidelineOriginal;g.querySelectorAll('[data-guide-speak]').forEach(b=>b.remove());}
-  addGuideSpeechControls();
-  setLanguageStatus('English selected');
- }
+
+function stopAudioRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch (_) {}
+  }
 }
-const ORIGINAL_SHOW_PAGE_HAUSA=showPage;
-showPage=function(id,reminderCategory){
- ORIGINAL_SHOW_PAGE_HAUSA(id,reminderCategory);
- if(chronicLanguage==='ha')setTimeout(()=>{if(id==='measurementGuide')renderHausaMeasurementGuides();if(id==='userGuidelines')renderHausaUserGuidelines()},0);
+
+function abortDictation() {
+  if (englishRecognition) {
+    try { englishRecognition.abort(); } catch (_) {}
+    englishRecognition = null;
+  }
+
+  stopAudioRecording();
+  recordingField = null;
+}
+
+/* Choose the correct speech system */
+async function toggleDictation(id) {
+  if (!micEnabled) {
+    setSpeechStatus(id, 'Enable the microphone first.');
+    return;
+  }
+
+  if (selectedLanguage() === 'en') {
+    if (englishRecognition) {
+      try { englishRecognition.stop(); } catch (_) {}
+      return;
+    }
+
+    startEnglishDictation(id);
+    return;
+  }
+
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    if (recordingField === id) {
+      setSpeechStatus(id, 'Processing Hausa recording…');
+      mediaRecorder.stop();
+    } else {
+      setSpeechStatus(id, 'Stop the current recording first.');
+    }
+    return;
+  }
+
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    setSpeechStatus(id, 'Please wait for the previous recording.');
+    return;
+  }
+
+  await startHausaDictation(id);
+}
+
+/* Translation result panel */
+function showTranslationResult(fieldId, original, translated, source, target) {
+  const field = document.getElementById(fieldId);
+  if (!field) return;
+
+  let panel = field.parentElement.querySelector(
+    `.translation-result[data-for="${fieldId}"]`
+  );
+
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'translation-result';
+    panel.dataset.for = fieldId;
+    field.parentElement.appendChild(panel);
+  }
+
+  panel.replaceChildren();
+
+  const label = document.createElement('strong');
+  label.textContent = source === 'ha' ? 'Hausa → English: ' : 'English → Hausa: ';
+  panel.appendChild(label);
+
+  const output = document.createElement('div');
+  output.textContent = translated;
+  panel.appendChild(output);
+
+  const actions = document.createElement('div');
+  actions.className = 'translation-actions';
+
+  const use = document.createElement('button');
+  use.type = 'button';
+  use.className = 'btn small soft';
+  use.textContent = 'Use translation';
+
+  use.onclick = () => {
+    field.value = translated;
+    field.dataset.contentLanguage = target;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    panel.remove();
+    setSpeechStatus(fieldId, 'Translation inserted. Review before saving.');
+  };
+
+  const keep = document.createElement('button');
+  keep.type = 'button';
+  keep.className = 'btn small';
+  keep.textContent = 'Keep original';
+  keep.onclick = () => panel.remove();
+
+  actions.append(use, keep);
+  panel.appendChild(actions);
+}
+
+async function translateField(id) {
+  const field = document.getElementById(id);
+  if (!field) return;
+
+  const original = field.tagName === 'SELECT'
+    ? field.selectedOptions?.[0]?.textContent
+    : field.value;
+
+  if (!String(original || '').trim()) {
+    setSpeechStatus(id, 'Enter text before translating.');
+    return;
+  }
+
+  const source = field.dataset.contentLanguage || selectedLanguage();
+  const target = source === 'ha' ? 'en' : 'ha';
+
+  setSpeechStatus(id, 'Translating…');
+
+  try {
+    const translated = await translateText(original, source, target);
+    showTranslationResult(id, original, translated, source, target);
+    setSpeechStatus(id, 'Translation ready.');
+  } catch (e) {
+    setSpeechStatus(id, 'Translation failed: ' + e.message);
+  }
+}
+
+/* Field controls */
+function enhanceTextFields() {
+  document.querySelectorAll('.field input,.field select,.field textarea')
+    .forEach(field => {
+      if (
+        !field.id ||
+        field.dataset.speechEnhanced ||
+        ['date', 'datetime-local', 'time', 'hidden', 'checkbox',
+         'radio', 'file', 'submit', 'password'].includes(field.type)
+      ) return;
+
+      field.dataset.speechEnhanced = '1';
+
+      const controls = document.createElement('div');
+      controls.className = 'speech-controls';
+
+      const buttons = [
+        ['dictate', '🎙 Dictate'],
+        ['translate', '⇄ Translate'],
+        ['read', '🔊 Listen'],
+        ['clear', '✕ Clear']
+      ];
+
+      buttons.forEach(([action, label]) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn small';
+        button.textContent = label;
+        button.dataset.speechAction = action;
+        button.dataset.target = field.id;
+
+        button.addEventListener('click', () => {
+          if (action === 'dictate') toggleDictation(field.id);
+          if (action === 'translate') translateField(field.id);
+          if (action === 'read') readBack(field.id, button);
+          if (action === 'clear') clearField(field.id);
+        });
+
+        controls.appendChild(button);
+      });
+
+      const status = document.createElement('span');
+      status.className = 'speech-status';
+      status.dataset.speechStatus = field.id;
+      status.setAttribute('role', 'status');
+      controls.appendChild(status);
+
+      field.insertAdjacentElement('afterend', controls);
+    });
+}
+
+/* Read aloud */
+async function speakText(text, button, options = {}) {
+  text = String(text || '').trim();
+  if (!text) return;
+
+  if (chronicLanguage === 'en') {
+    if (!('speechSynthesis' in window)) {
+      alert('English read-aloud is unavailable in this browser.');
+      return;
+    }
+
+    const synth = window.speechSynthesis;
+
+    if (synth.speaking && activeSpeechButton === button) {
+      synth.cancel();
+      activeSpeechButton = null;
+      if (button) button.textContent = '🔊 Listen';
+      return;
+    }
+
+    synth.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'en-NG';
+    utterance.rate = 0.95;
+
+    if (button) {
+      button.textContent = '■ Stop audio';
+      activeSpeechButton = button;
+    }
+
+    const finish = () => {
+      if (activeSpeechButton === button) {
+        activeSpeechButton = null;
+        if (button) button.textContent = '🔊 Listen';
+      }
+    };
+
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    synth.speak(utterance);
+    return;
+  }
+
+  if (activeHausaAudio) {
+    hausaSpeechToken++;
+    activeHausaAudio.pause();
+    activeHausaAudio = null;
+    if (button) button.textContent = '🔊 Listen';
+    return;
+  }
+
+  const token = ++hausaSpeechToken;
+
+  try {
+    let spoken = text;
+
+    if (!options.alreadyHausa && options.sourceLanguage !== 'ha') {
+      spoken = await translateText(text, 'en', 'ha');
+    }
+
+    if (spoken.length > 1000) {
+      throw new Error('Please select a shorter section to read aloud.');
+    }
+
+    if (button) button.textContent = 'Preparing Hausa audio…';
+
+    const result = await naijaRequest({
+      action: 'speech',
+      text: spoken,
+      language: 'ha',
+      voice: 'hausa_male2'
+    });
+
+    if (token !== hausaSpeechToken) return;
+
+    const audio = new Audio(
+      'data:audio/mpeg;base64,' + result.audioBase64
+    );
+
+    activeHausaAudio = audio;
+
+    if (button) button.textContent = '■ Stop audio';
+
+    await new Promise((resolve, reject) => {
+      audio.onended = resolve;
+      audio.onpause = resolve;
+      audio.onerror = () => reject(new Error('Audio playback failed.'));
+      audio.play().catch(reject);
+    });
+
+    if (activeHausaAudio === audio) activeHausaAudio = null;
+    if (button) button.textContent = '🔊 Listen';
+
+  } catch (e) {
+    activeHausaAudio = null;
+    if (button) button.textContent = '🔊 Listen';
+    setLanguageStatus('Hausa audio error');
+    alert('Hausa audio failed: ' + e.message);
+  }
+}
+
+function readBack(id, button) {
+  const field = document.getElementById(id);
+  const text = field?.tagName === 'SELECT'
+    ? field.selectedOptions?.[0]?.textContent
+    : field?.value;
+
+  speakText(text, button, {
+    sourceLanguage: field?.dataset.contentLanguage || selectedLanguage(),
+    alreadyHausa: field?.dataset.contentLanguage === 'ha'
+  });
+}
+
+function clearField(id) {
+  const field = document.getElementById(id);
+  if (!field) return;
+
+  if (recordingField === id) stopAudioRecording();
+
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+
+  if (activeHausaAudio) {
+    activeHausaAudio.pause();
+    activeHausaAudio = null;
+  }
+
+  if (field.tagName === 'SELECT') {
+    field.selectedIndex = 0;
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    field.value = '';
+    field.dataset.contentLanguage = '';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  field.focus();
+  setSpeechStatus(id, '');
+  field.parentElement.querySelector(
+    `.translation-result[data-for="${id}"]`
+  )?.remove();
+}
+
+/* Condition selection */
+async function toggleConditionDictation(prefix) {
+  const group = document.getElementById(prefix + 'Conditions');
+  if (!group) return;
+
+  const id = prefix + 'ConditionVoiceTemp';
+  let temporary = document.getElementById(id);
+
+  if (!temporary) {
+    temporary = document.createElement('textarea');
+    temporary.id = id;
+    temporary.style.position = 'absolute';
+    temporary.style.left = '-9999px';
+    document.body.appendChild(temporary);
+
+    temporary.addEventListener('input', async () => {
+      let phrase = temporary.value.toLowerCase();
+
+      if (selectedLanguage() === 'ha') {
+        try {
+          phrase = (await translateText(phrase, 'ha', 'en')).toLowerCase();
+        } catch (_) {}
+      }
+
+      const checks = [...group.querySelectorAll('input')];
+      const matched = checks.filter(c =>
+        phrase.includes(c.value.toLowerCase())
+      );
+
+      matched.forEach(c => c.checked = true);
+
+      const status = document.getElementById(
+        prefix + 'ConditionSpeechStatus'
+      );
+
+      if (status) {
+        status.textContent = matched.length
+          ? 'Selected: ' + matched.map(c => c.value).join(', ')
+          : 'Review the transcript and select manually.';
+      }
+    });
+  }
+
+  temporary.value = '';
+  await toggleDictation(id);
+}
+
+async function translateConditionSelection(prefix) {
+  const group = document.getElementById(prefix + 'Conditions');
+  const status = document.getElementById(prefix + 'ConditionSpeechStatus');
+
+  if (!group) return;
+
+  const values = [...group.querySelectorAll('input:checked')]
+    .map(x => x.value).join(', ');
+
+  if (!values) {
+    if (status) status.textContent = 'Select a condition first.';
+    return;
+  }
+
+  try {
+    const translated = await translateText(values, 'en', 'ha');
+    if (status) status.textContent = 'Hausa: ' + translated;
+  } catch (e) {
+    if (status) status.textContent = e.message;
+  }
+}
+
+/* Hausa guidance */
+function extractGuideSectionsFromHTML(markup) {
+  const doc = new DOMParser().parseFromString(markup, 'text/html');
+
+  return [...doc.querySelectorAll('details.measurement-guide-card')]
+    .map((card, i) => ({
+      title: card.querySelector('summary')?.textContent.trim() ||
+        ('Reading guide ' + (i + 1)),
+      text: [...card.querySelectorAll('li')]
+        .map((li, n) => (n + 1) + '. ' + li.textContent.trim())
+        .join('\n')
+    }));
+}
+
+async function renderHausaMeasurementGuides() {
+  const root = document.getElementById('profileMeasurementGuides');
+  if (!root) return;
+
+  if (!hausaGuideOriginal) hausaGuideOriginal = root.innerHTML;
+
+  const sections = extractGuideSectionsFromHTML(hausaGuideOriginal);
+  const source = [
+    'YADDA AKE AUNA LAFIYA DAIDAI',
+    'Umarnin nan na taimakawa wajen yin rikodi daidai.'
+  ];
+
+  sections.forEach(section => {
+    source.push(section.title, section.text);
+  });
+
+  source.push(
+    'MUHIMMIN BAYANI',
+    'Ka rubuta sakamakon daidai da naura da lokacin aunawa. Kada ka canza magani bisa sakamako guda daya. Idan kana jin rashin lafiya sosai, nemi taimakon gaggawa.'
+  );
+
+  root.textContent = 'Ana fassara umarnin zuwa Hausa…';
+
+  try {
+    const translated = await translateText(source.join('\n'), 'en', 'ha');
+
+    const panel = document.createElement('div');
+    panel.className = 'hausa-guide-panel';
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Umarnin auna lafiya (Hausa)';
+
+    const content = document.createElement('div');
+    content.textContent = translated;
+
+    const button = document.createElement('button');
+    button.className = 'btn soft small';
+    button.textContent = '🔊 Saurari umarnin';
+    button.onclick = () => speakText(translated, button, { alreadyHausa: true });
+
+    panel.append(heading, content, button);
+    root.replaceChildren(panel);
+
+  } catch (e) {
+    root.textContent = 'Ba a iya fassara umarnin yanzu ba: ' + e.message;
+  }
+}
+
+async function renderHausaUserGuidelines() {
+  const root = document.getElementById('profileGuidelines');
+  if (!root) return;
+
+  if (!guidelineOriginal) guidelineOriginal = root.innerHTML;
+
+  const doc = new DOMParser().parseFromString(guidelineOriginal, 'text/html');
+  const items = [...doc.querySelectorAll('.guide-item')];
+
+  const source = items.map((item, i) => {
+    const title = item.querySelector('b')?.textContent || '';
+    const body = item.querySelector('p')?.textContent || '';
+    return (i + 1) + '. ' + title + '\n' + body;
+  }).join('\n\n');
+
+  try {
+    const translated = await translateText(source, 'en', 'ha');
+
+    const panel = document.createElement('div');
+    panel.className = 'hausa-guide-panel';
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Jagorar mai amfani (Hausa)';
+
+    const content = document.createElement('div');
+    content.textContent = translated;
+
+    const button = document.createElement('button');
+    button.className = 'btn soft small';
+    button.textContent = '🔊 Saurari jagorar';
+    button.onclick = () => speakText(translated, button, { alreadyHausa: true });
+
+    panel.append(heading, content, button);
+    root.replaceChildren(panel);
+
+  } catch (e) {
+    root.textContent = 'Ba a iya fassara jagorar yanzu ba: ' + e.message;
+  }
+}
+
+/* Language selection */
+async function changeChronicLanguage(language) {
+  if (activeHausaAudio) {
+    hausaSpeechToken++;
+    activeHausaAudio.pause();
+    activeHausaAudio = null;
+  }
+
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+
+  chronicLanguage = language === 'ha' ? 'ha' : 'en';
+
+  const selector = document.getElementById('chronicLanguage');
+  if (selector) selector.value = chronicLanguage;
+
+  try {
+    localStorage.setItem('chronicdiary_language', chronicLanguage);
+  } catch (_) {}
+
+  if (chronicLanguage === 'ha') {
+    setLanguageStatus('Ana shirya Hausa…');
+
+    const active = document.querySelector('.page.active')?.id;
+
+    if (active === 'measurementGuide') await renderHausaMeasurementGuides();
+    else if (active === 'userGuidelines') await renderHausaUserGuidelines();
+    else setLanguageStatus('Hausa selected. N-ATLaS speech is ready.');
+  } else {
+    const measurement = document.getElementById('profileMeasurementGuides');
+    if (measurement && hausaGuideOriginal) {
+      measurement.innerHTML = hausaGuideOriginal;
+    }
+
+    const guidelines = document.getElementById('profileGuidelines');
+    if (guidelines && guidelineOriginal) {
+      guidelines.innerHTML = guidelineOriginal;
+    }
+
+    setLanguageStatus('English selected. Browser speech is ready.');
+  }
+}
+
+const ORIGINAL_SHOW_PAGE_HAUSA = showPage;
+
+showPage = function(id, reminderCategory) {
+  ORIGINAL_SHOW_PAGE_HAUSA(id, reminderCategory);
+
+  if (chronicLanguage === 'ha') {
+    setTimeout(() => {
+      if (id === 'measurementGuide') renderHausaMeasurementGuides();
+      if (id === 'userGuidelines') renderHausaUserGuidelines();
+    }, 0);
+  }
 };
-function setupChronicLanguage(){
- const selector=document.getElementById('chronicLanguage');let saved='en';try{saved=localStorage.getItem('chronicdiary_language')||'en'}catch(_){}
- chronicLanguage=saved==='ha'?'ha':'en';if(selector)selector.value=chronicLanguage;
- const observer=new MutationObserver(()=>enhanceTextFields());observer.observe(document.getElementById('application')||document.body,{childList:true,subtree:true});
- if(chronicLanguage==='ha')setLanguageStatus('Hausa voice and translation ready');
+
+function setupChronicLanguage() {
+  const selector = document.getElementById('chronicLanguage');
+  let saved = 'en';
+
+  try {
+    saved = localStorage.getItem('chronicdiary_language') || 'en';
+  } catch (_) {}
+
+  chronicLanguage = saved === 'ha' ? 'ha' : 'en';
+
+  if (selector) selector.value = chronicLanguage;
+
+  const observer = new MutationObserver(() => enhanceTextFields());
+
+  observer.observe(
+    document.getElementById('application') || document.body,
+    { childList: true, subtree: true }
+  );
+
+  enhanceTextFields();
+
+  setLanguageStatus(
+    chronicLanguage === 'ha' ? 'Hausa selected' : 'English selected'
+  );
 }
+
 setupChronicLanguage();
 initialize();
 </script>
