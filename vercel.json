@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/naija.js": {
+      "maxDuration": 60
+    }
+  }
+}
