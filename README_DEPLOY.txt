@@ -1,4 +1,4 @@
-CHRONICDIARY HAUSA VOICE DEMO — VERCEL DEPLOYMENT
+CHRONICDIARY HAUSA VOICE DEMO VERCEL DEPLOYMENT
 
 CONTENTS
 - index.html: your existing ChronicDiary interface with Hausa language selection, N-ATLaS translation, Hausa speech playback, and API-based voice transcription.
